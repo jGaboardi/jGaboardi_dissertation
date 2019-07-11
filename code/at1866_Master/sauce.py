@@ -3500,7 +3500,6 @@ def snap_to_nearest(pp, sframe=None, net=None, kd_tree=None):
                 if net.segm2geom[ns].intersects(point.buffer(pp.tol)):
                     spinfo['assoc_segm'] = ns
                     break
-            
             return spinfo
         
         
@@ -3580,7 +3579,7 @@ def snap_to_nearest(pp, sframe=None, net=None, kd_tree=None):
     if type(net.node2segm) == list:
         net.node2segm = _convert_to_dict(net.node2segm)
     if type(net.segm2geom) == list:
-        net.node2segm = _convert_to_dict(net.segm2geom)
+        net.segm2geom = _convert_to_dict(net.segm2geom)
     
     k_near_elems = _get_k_nearest(pp, net)
     
@@ -3598,10 +3597,13 @@ def snap_to_nearest(pp, sframe=None, net=None, kd_tree=None):
     # add decision variables if not incident calls
     if pp.df_name != 'ResidentIncidents'\
     and pp.study_area != 'Test_Grid_Leon_FL':
-        dv = 'desc_var'
-        cols = cols + [dv]
-        [info_dict.update({dv: pp.df.loc[idx, dv]}) \
-                                    for idx, info_dict in snapped_pts.items()]
+        try:
+            dv = 'desc_var'
+            cols = cols + [dv]
+            [info_dict.update({dv: pp.df.loc[idx, dv]}) \
+                                        for idx, info_dict in snapped_pts.items()]
+        except KeyError:
+            pass
     
     # create dataframe
     snp_pts_df = utils.fill_frame(pp.df, full=True,

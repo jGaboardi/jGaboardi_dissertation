@@ -17,6 +17,7 @@ from shapely.ops import polygonize
 
 # project library imports
 from . import utils
+from . import spaghetti as spgh
 
 
 def high_precision_id(c1, c2, c3):
@@ -47,6 +48,7 @@ def high_precision_id(c1, c2, c3):
 def pp2n(segms, polys, columns=None, offset_=None, remove_segm=None,
          restrict_col=None, drop_cols=None, xyid=None, geo_col=None,
          sid_name=None, poly_key=None, poly_pop=None, proj_init=None,
+         problems_writer=None, print_diags=True,
          line_pos=0.5, exhaustion_threshold=.9, pp2n_pointloc_increment=0.05,
          parallel_increment=0.5, pop_type=float, pp2n_id='pp2n_id',
          pp2n_col='pop_pp2n', mtfcc='MTFCC', len_segm='len_segm',
@@ -100,6 +102,8 @@ def pp2n(segms, polys, columns=None, offset_=None, remove_segm=None,
         segment column name. Default is None.
     xyid : str
         combined x-coord + y-coords string ID. Default is None.
+    problems_writer : str
+        directory to write pickled population problems dict
     proj_init : int
         intial coordinate reference system. default is None.
     geo_col : str
@@ -120,6 +124,8 @@ def pp2n(segms, polys, columns=None, offset_=None, remove_segm=None,
         total associated length column name. Default is 'len_tot'.
     pop_rat : str
         population ratio column name. Default is 'pop_rat'.
+    print_diags : bool
+        True
     
     Returns
     -------
@@ -127,35 +133,49 @@ def pp2n(segms, polys, columns=None, offset_=None, remove_segm=None,
         generated, weighted pp2n points
     """
     
+    orig_pop = polys[poly_pop].sum()
+    
     # list of pp2n points
-    pp2n_pts = create_pp2n(segms, polys,
-                           offset_=offset_, line_pos=line_pos,
+    pp2n_pts = create_pp2n(segms, polys, offset_=offset_, line_pos=line_pos,
                            parallel_increment=parallel_increment,
-                           exhaustion_threshold=exhaustion_threshold,
-                           pp2n_pointloc_increment=pp2n_pointloc_increment,
-                           remove=remove_segm, geo_col=geo_col,
-                           mtfcc=mtfcc, sid_name=sid_name)
+                            exhaustion_threshold=exhaustion_threshold,
+                            pp2n_pointloc_increment=pp2n_pointloc_increment,
+                            remove=remove_segm, geo_col=geo_col,
+                            mtfcc=mtfcc, sid_name=sid_name)
     
     # create pp2n dataframe
-    df = create_pp2n_df(pp2n_pts, polys, segms, columns, crs=proj_init,
-                        remove=remove_segm, drop=drop_cols, sid_name=sid_name,
-                        pp2n_col=pp2n_col, len_segm=len_segm, len_tot=len_tot,
-                        pop_rat=pop_rat, mtfcc=mtfcc, geo_col=geo_col,
-                        restrict_col=restrict_col)
+    df, orphans = create_pp2n_df(pp2n_pts, polys, segms, columns, poly_key,
+                                 crs=proj_init, remove=remove_segm,
+                                 drop=drop_cols, sid_name=sid_name,
+                                 pp2n_col=pp2n_col, len_segm=len_segm,
+                                 len_tot=len_tot, pop_rat=pop_rat,
+                                 mtfcc=mtfcc, geo_col=geo_col,
+                                 restrict_col=restrict_col,
+                                 poly_pop=poly_pop)
     
     # add unique id
     df[pp2n_id] = np.vectorize(high_precision_id)\
                               (df[poly_key], df[sid_name], df.index)
     
     # proportionalize population
-    df = div_pop(df, pp2n_col=pp2n_col, poly_key=poly_key,
+    df = div_pop(df, orphans, pp2n_col=pp2n_col, poly_key=poly_key,
                  len_tot=len_tot, pop_rat=pop_rat, len_segm=len_segm,
-                 poly_pop=poly_pop, as_type=pop_type)
+                 poly_pop=poly_pop, as_type=pop_type, offset_=offset_,
+                 problems_writer=problems_writer)
     
-    # due rounding precision during the previous step, some
-    # pp2n point will be worth 0 population (i.e. population
-    # ratio is 0.002, so population will be 0.0); drop these
-    # cases as population total will be valid.
+    est_pop = df[pp2n_col].sum()
+    # check that original population is equivalent to pp2n population
+    if not np.isclose([orig_pop], [est_pop]):
+        raise RuntimeError('Estimated and original population not equal.' \
+                           + orig_pop, '!=', est_pop)
+    
+    n_orphans = len(orphans) if orphans else 0
+    
+    if print_diags:
+        print('\t\t\t\tOriginal population:\t', orig_pop)
+        print('\t\t\t\tEstimated population:\t', est_pop)
+        print('\t\t\t\tOrphans:\t\t', n_orphans)
+    
     df = df[df[pp2n_col] > 0.0]
     df.reset_index(inplace=True, drop=True)
     
@@ -212,7 +232,7 @@ def create_pp2n(segms, polys, offset_=None, line_pos=None,
         # line of interest
         loi = segms.loc[idx, geo_col]
         
-        # create a buffered offset from line-of-interest enveope
+        # create a buffered offset from line-of-interest envelope
         loi_buffer = loi.envelope.buffer(offset_)
         
         # then extract the intersection
@@ -293,12 +313,11 @@ def create_pp2n(segms, polys, offset_=None, line_pos=None,
                                 
                                 if pp2n_point.intersects(local_poly):
                                     segm_pp2n_pts.append(pp2n_point)
-                                    
                                     # once a viable point has been
                                     # located break out of the
                                     # location fixer
                                     fixing_loc = False
-                                    
+                            
                         # once two pp2n points have been located
                         # break out of the while loop
                         if len(segm_pp2n_pts) == 2:
@@ -480,9 +499,11 @@ def _gen_offsets(loi_, initial_offset, parallel_increment):
     return offset_lines_
 
 
-def create_pp2n_df(pts, polys, segms, cols, crs=None, remove=None, drop=None,
-                   pp2n_col=None, geo_col=None, sid_name=None, len_segm=None,
-                   len_tot=None, pop_rat=None, mtfcc=None, restrict_col=None):
+def create_pp2n_df(pts, polys, segms, cols, poly_key, crs=None,
+                   remove=None, drop=None, pp2n_col=None, geo_col=None,
+                   sid_name=None, len_segm=None, len_tot=None,
+                   pop_rat=None, mtfcc=None, restrict_col=None,
+                   poly_pop=None):
     """mid level function -- instantiate a GeoDataFrame
     for the pp2n points
     
@@ -494,6 +515,8 @@ def create_pp2n_df(pts, polys, segms, cols, crs=None, remove=None, drop=None,
     polys : see pp2n()
     segms : see pp2n()
     cols : see pp2n(columns)
+    poly_key : see pp2n()
+    poly_pop : see pp2n()
     remove : see pp2n(remove_segm)
     drop : see pp2n(drop_cols)
     pp2n_col : see pp2n()
@@ -532,17 +555,49 @@ def create_pp2n_df(pts, polys, segms, cols, crs=None, remove=None, drop=None,
     # perform a spatial join
     polys = utils.set_crs(polys, proj_init=crs)
     df = gpd.sjoin(df, polys)
-    df = utils.set_crs(df, proj_init=crs)
-    
     # drop irrelevant columns
     if drop:
         df.drop(drop, axis=1, inplace=True)
     
-    return df
+    # determine whether any populated polygons in the dataset
+    # were not given pp2n points
+    orphans = list(set(polys[poly_key]).symmetric_difference(df[poly_key]))
+    
+    # if there were, label them as orphans,
+    # give them the polygon attributes,
+    # and represent them a single centroid
+    if orphans:
+        empty_shell = np.empty((len(orphans), df.shape[1]))
+        orphans_df = gpd.GeoDataFrame(empty_shell, columns=df.columns, crs=crs)
+        orphans_df[poly_key] = orphans
+        orphans_df[geo_col] = [polys.loc[(polys[poly_key] == o), geo_col]\
+                                          .squeeze().centroid for o in orphans]
+        orphans_df[pp2n_col] = [polys.loc[(polys[poly_key] == o), poly_pop]\
+                                                   .squeeze() for o in orphans]
+        
+        label_orphan = [restrict_col, sid_name, len_segm, len_tot, pop_rat]
+        for lo in label_orphan:
+            orphans_df[lo] = ['ORPHAN'] * len(orphans)
+        
+        for o in orphans:
+            for pc in polys.columns:
+                if pc in [poly_key, geo_col]:
+                    continue
+                odf_key = (orphans_df[poly_key] == o)
+                pdf_key = (polys[poly_key] == o)
+                orphans_df.loc[odf_key, pc] = polys.loc[pdf_key, pc].squeeze()
+        
+        df = df.append(orphans_df)
+    
+    df.reset_index(inplace=True, drop=True)
+    df = utils.set_crs(df, proj_init=crs)
+    
+    return df, orphans
 
 
-def div_pop(df, as_type=None, pp2n_col=None, poly_key=None, len_segm=None,
-            poly_pop=None, len_tot=None, pop_rat=None):
+def div_pop(df, orphans, as_type=None, pp2n_col=None, poly_key=None,
+            len_segm=None, poly_pop=None, len_tot=None, pop_rat=None,
+            offset_=None, problems_writer=None):
     """ mid level function -- assign a ratio of the total population
     to each pp2n point within a census geography based on the ratio of
     the associated line segment length to the total length of line
@@ -552,6 +607,9 @@ def div_pop(df, as_type=None, pp2n_col=None, poly_key=None, len_segm=None,
     ----------
     df : geopandas.GeoDataFrame
         pp2n dataframe
+    orphans : list
+        GEOIDs for populated polygons that no suitable pp2n point
+        could be found.
     as_type : {int, float}
         data type of the generated pp2n population. Default is None.
     pp2n_col : see pp2n()
@@ -560,6 +618,8 @@ def div_pop(df, as_type=None, pp2n_col=None, poly_key=None, len_segm=None,
     len_segm : see pp2n()
     len_tot : see pp2n()
     pop_rat : see pp2n()
+    offset_ : see pp2n()
+    problems_writer : see pp2n()
     
     Returns
     -------
@@ -570,6 +630,9 @@ def div_pop(df, as_type=None, pp2n_col=None, poly_key=None, len_segm=None,
     # for each group of pp2n points within
     # a single census geography
     for idx in df[poly_key].unique():
+        
+        if idx in orphans:
+            continue
         
         # subset the dataframe
         pre_subset = df[df[poly_key] == idx].copy()
@@ -592,7 +655,7 @@ def div_pop(df, as_type=None, pp2n_col=None, poly_key=None, len_segm=None,
             # set population associated with pp2n point
             df.loc[ss_idx, pp2n_col] = as_type(df.loc[ss_idx, pop_rat] \
                                                 * df.loc[ss_idx, poly_pop])
-        
+            
         # check and adjust population as needed
         df = check_pop(df, idx, poly_key, poly_pop, pp2n_col)
     
@@ -600,7 +663,8 @@ def div_pop(df, as_type=None, pp2n_col=None, poly_key=None, len_segm=None,
         df[pp2n_col] = df[pp2n_col].astype(as_type)
     
     # run final confirmation check for population
-    _check_pop(df, idx, poly_key, poly_pop, pp2n_col)
+    _check_pop(df, idx, poly_key, poly_pop, pp2n_col,
+               offset_=offset_, problems_writer=problems_writer)
     
     return df
 
@@ -641,7 +705,7 @@ def check_pop(df_, id_, poly_key, pop_col, pp2n_col,
     adjuster = subset.index[0]
     orig_sum = subset[pop_col][adjuster]
     
-    if pp2n_sum != orig_sum:
+    if not np.isclose([pp2n_sum], [orig_sum]):
         
         if not round2:
             diff = pp2n_sum - orig_sum
@@ -660,7 +724,8 @@ def check_pop(df_, id_, poly_key, pop_col, pp2n_col,
 
 
 def _check_pop(df_, id_, poly_key, pop_col, pp2n_col,
-               problems=None, round2=True):
+               problems=None, round2=True, offset_=None,
+               problems_writer=None):
     """ low level function -- ensure the sum of the pp2n population
     is equal to the original population
     
@@ -673,6 +738,9 @@ def _check_pop(df_, id_, poly_key, pop_col, pp2n_col,
     pp2n_col : see check_pop()
     problems : see check_pop()
     round2 : see check_pop()
+    offset_ : see pp2n()
+    problems_writer : see pp2n()
+    
     """
     
     problems = {}
@@ -683,6 +751,10 @@ def _check_pop(df_, id_, poly_key, pop_col, pp2n_col,
     if problems:
         warnings.warn('\n\npp2n sum is not equal to original population sum.')
         warnings.warn(problems.__str__())
+        
+        # pickle `problems dict`
+        prob_name = '%s%s' % (pp2n_col, offset_)
+        spgh.dump_pickled(problems, problems_writer, pickle_name=prob_name)
 
 
 def va2n(area, alloc_dir, geogs, net_segms, net_nodes, remove_segm=None,
@@ -775,12 +847,17 @@ def va2n(area, alloc_dir, geogs, net_segms, net_nodes, remove_segm=None,
         a population associated with it.
     """
     
+    
     # -- Line Voronoi Diagram
     lvd_file = '%slvd_%s_%s%s' % (alloc_dir, initial_rho, area, file_type)
     # if the file already exists skip
-    lvd_file_exists = os.path.exists(lvd_file)
+    #lvd_file_exists = os.path.exists(lvd_file)
+    lvd_file_exists = False
     if not lvd_file_exists:
-    
+        
+        print('\t\t\tStart LVD -----')
+        start_lvd = time.time()
+        
         # create line voronoi diagram
         lvd = faux_lvd(area, net_segms, net_nodes, remove_segm=remove_segm,
                        mtfcc=mtfcc, bounds=bounds, clip_by=clip_by,
@@ -790,16 +867,21 @@ def va2n(area, alloc_dir, geogs, net_segms, net_nodes, remove_segm=None,
                        diagnostic=voronoi_diagnostic, area_thresh=area_thresh,
                        geo_col=geo_col, inter=inter, proj_init=proj_init,
                        file_type=file_type)
+        end_lvd = round((time.time()-start_lvd)/60., 10)
+        print('\t\t\tEnd LVD ----- %s' % end_lvd)
+        
         lvd.to_file(lvd_file)
     else:
         lvd = gpd.read_file(lvd_file)
         lvd = utils.set_crs(lvd, proj_init=proj_init)
     
     
+    
     # -- va2n Polygons
     va2n_poly_file = '%s%s%s' % (inter, va2n_polys, file_type)
     # if the file already exists skip
-    va2n_poly_file_exists = os.path.exists(va2n_poly_file)
+    #va2n_poly_file_exists = os.path.exists(va2n_poly_file)
+    va2n_poly_file_exists = False
     if not va2n_poly_file_exists:
         
         # overlay -- Union of census geographies and LVD cells 
@@ -845,7 +927,8 @@ def va2n(area, alloc_dir, geogs, net_segms, net_nodes, remove_segm=None,
     va2n_point_file = '%sva2n_%s_%s%s' % (alloc_dir, initial_rho,
                                            area, file_type)
     # if the file already exists skip
-    va2n_point_file_exists = os.path.exists(va2n_point_file)
+    #va2n_point_file_exists = os.path.exists(va2n_point_file)
+    va2n_point_file_exists = False
     if not va2n_point_file_exists:
         
         # va2n point dataframe
@@ -1030,7 +1113,8 @@ def faux_lvd(area, segms, nodes, remove_segm=None, mtfcc=None, inter=None,
         # Densified Line Segment Vertices
         vtxs_file = '%svtxs_df_%s_%s%s' % (inter, area, iteration, file_type)
         # if the file already exists skip
-        vtxs_file_exists = os.path.exists(vtxs_file)
+        #vtxs_file_exists = os.path.exists(vtxs_file)
+        vtxs_file_exists = False
         if not vtxs_file_exists:
             
             # generate a dense point chain
@@ -1050,12 +1134,12 @@ def faux_lvd(area, segms, nodes, remove_segm=None, mtfcc=None, inter=None,
             vtxs_df = gpd.read_file(vtxs_file)
             vtxs_df = utils.set_crs(vtxs_df, proj_init=proj_init)
         
-        
         # Point Voronoi Diagram Polygons
         pvd_polys_file = '%spvd_polys_df_%s_%s%s' % (inter, area,
                                                      iteration, file_type)
         # if the file already exists skip
         pvd_polys_file_exists = os.path.exists(pvd_polys_file)
+        pvd_polys_file_exists = False
         if not pvd_polys_file_exists:
             
             # generate point Voronoi diagram from dense point chains
@@ -1072,14 +1156,13 @@ def faux_lvd(area, segms, nodes, remove_segm=None, mtfcc=None, inter=None,
             pvd_polys_df = gpd.read_file(pvd_polys_file)
             pvd_polys_df = utils.set_crs(pvd_polys_df, proj_init=proj_init)
         
-        del vtxs_df
-        
-        
         # Line Voronoi Diagram Polygons -- All
         lvd_polys_file = '%sall_lvd_polys_df_%s_%s%s' % (inter, area,
                                                          iteration, file_type)
+        
         # if the file already exists skip
-        lvd_polys_file_exists = os.path.exists(lvd_polys_file)
+        #lvd_polys_file_exists = os.path.exists(lvd_polys_file)
+        lvd_polys_file_exists = False
         if not lvd_polys_file_exists:
             
             # generate buffer of nodes to match the `offset_param`
@@ -1102,16 +1185,16 @@ def faux_lvd(area, segms, nodes, remove_segm=None, mtfcc=None, inter=None,
         del pvd_polys_df
         
         # set break condition for `Test_Grid_Leon_FL`
-        if area == 'Test_Grid_Leon_FL':
+        if area in ['Test_Grid_Leon_FL', 'Test_Sine_Leon_FL']:
             algo_complete = True
             return lvd_polys_df
-        
         
         # Line Voronoi Diagram Polygons -- Clipped and Cleaned
         lvd_polys_file = '%scac_lvd_polys_df_%s_%s%s' % (inter, area,
                                                          iteration, file_type)
         # if the file already exists skip
-        lvd_polys_file_exists = os.path.exists(lvd_polys_file)
+        #lvd_polys_file_exists = os.path.exists(lvd_polys_file)
+        lvd_polys_file_exists = False
         if not lvd_polys_file_exists:
             
             # intersections
@@ -1148,7 +1231,7 @@ def faux_lvd(area, segms, nodes, remove_segm=None, mtfcc=None, inter=None,
             lvd_polys_df = utils.set_crs(lvd_polys_df, proj_init=proj_init)
         
         
-        # total area of symmetric difference LVD poltgon cells
+        # total area of symmetric difference LVD polygon cells
         post_area = lvd_polys_df.area.sum()
         # ratio of the inital evelope area to the LVD area
         area_ratio = post_area / init_area

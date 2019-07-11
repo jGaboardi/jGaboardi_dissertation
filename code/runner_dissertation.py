@@ -10,15 +10,18 @@ from at1866_Master import utils
 from at1866_Master import spaghetti as spgh
 from at1866_Master import census_funcs as cf
 from at1866_Master import dissertation_workflows as dwfs
+from at1866_Master import figure_plotter as figplot
+from at1866_Master import summary_stats as sumstat
 
 print('::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::')
 print('::::\tRun initialized at:\t'+time.strftime('%Y-%m-%d %H:%M')+'\t::::')
+import cpuinfo
+print(cpuinfo.get_cpu_info()['brand'])
 print('::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::')
 
 fetch_census_data = False
 clean_census_data = False
 clean_service_data = True
-
 
 # import the following only if outside the RDC
 if sys.argv[1].upper() == 'RDC':
@@ -48,9 +51,17 @@ CO = sys.argv[3].capitalize()                   # Set county
 YR = '2010'                                     # Set year
 place_time = '_%s_%s_%s' % (CO, ST, YR)
 
+ # parallel offset for pp2n
+try:
+    PP2N_OFFSET = float(sys.argv[4])
+except IndexError:
+    PP2N_OFFSET = 5.
+LVOR_OFFSET = 1.                        # symdiff offset for va2n
+LVOR_PNT_RHO = 300                      # LVD point density for va2n
+
 # when running a subset
 try:
-    SS = 'Test_%s' % sys.argv[4].capitalize()    # Set subset within Leon County
+    SS = 'Test_%s' % sys.argv[5].capitalize()    # Set subset within Leon County
     STUDY_AREA = '%s_%s_%s' % (SS, CO, ST)
     test_cases, test_subsets = None, None
 # when running full county
@@ -84,9 +95,6 @@ SNAP_METHOD = 'segments'                # obsv snapping method to segments
 REPRESENTATION = ['pc2n',               # traditional centroids to network
                   'pp2n',               # pp2n method
                   'va2n']               # LVD/Overlay Okabe allocation
-PP2N_OFFSET = 5.                        # parallel offset for pp2n
-LVOR_OFFSET = 1.                        # symdiff offset for okabe
-LVOR_PNT_RHO = 300                      # LVD point density for okabe
 SNAP_RESTRICT = [INTRST, RAMP, SERV_DR] # interstates, ramps, service roads
 
 # .shp name to use to for each stage
@@ -104,7 +112,7 @@ data_dir = '../data/'
 results_dir = '../results/'
 initial, inter, clean,\
 c_cen, c_obs, c_net, c_cmx,\
-c_alc, r_plots,\
+c_alc, r_plots, r_tables,\
 r_facloc, = utils.directory_structure(STUDY_AREA, data_dir, shp_names,
                                       results_dir, tests=test_subsets)
 
@@ -203,7 +211,7 @@ if not IN_RDC and clean_service_data and STUDY_AREA == 'Leon_FL':
                          proj_init=WGS84, proj_trans=FLN_HARN_m,
                          geo_col=GEOMETRY, xyid=XYID, desc_var=DV,
                          popcol=parpopcol, subset_cols=subset_cols,
-                         in_geogs=in_geogs, min_thresh=0.1)
+                         in_geogs=in_geogs,min_thresh=0.0)
 
 #'''
 #########################################################  ABOVE non-RDC
@@ -226,6 +234,8 @@ if STUDY_AREA == 'Test_Tract_Leon_FL':
     __fs_phase_file = '%s%s' % (full_obs_dir, fs_phase_file_name)
     # extract these geographies from with 'tract'
     geos_clip = poly_names[2:] + cent_names[1:] + [parcel_file_base]
+    geos_clip += ['ParcelPolygons_Leon_FL_2010']
+    
     # create one tract census geographies subset
     utils.tract_subset(toi, full_cen_dir=full_cen_dir, subset_cen_dir=c_cen,
                        full_obs_dir=full_obs_dir, subset_obs_dir=c_obs,
@@ -240,6 +250,13 @@ if STUDY_AREA == 'Test_Grid_Leon_FL':
     dwfs.generate_grid(STUDY_AREA, place_time, initial, c_cen, xyid=XYID,
                        geo_col=GEOMETRY, sid_name=NTW_SEGM_ID_NAME,
                        proj_init=WGS84)
+
+# Make Sine subset
+if STUDY_AREA == 'Test_Sine_Leon_FL':
+    # generate and write out synthetic sine segment data
+    dwfs.generate_sine_lines(STUDY_AREA, place_time, initial,
+                             geo_col=GEOMETRY, sid_name=NTW_SEGM_ID_NAME,
+                             proj_init=WGS84)
 
 utils.time_phase(phase=phase, end=phase_start)
 
@@ -277,9 +294,26 @@ except FileNotFoundError:
         proj_init = FLN_HARN_m
         proj_trans = FLN_HARN_m
     
-    if STUDY_AREA == 'Test_Grid_Leon_FL':
+    if STUDY_AREA in ['Test_Grid_Leon_FL', 'Test_Sine_Leon_FL']:
         proj_init = WGS84
         proj_trans = WGS84
+    
+    if STUDY_AREA == 'Test_Sine_Leon_FL':
+        largest_component = False
+        simplify = False
+        gen_adjmtx = False
+        gen_matrix = False
+        save_simplified = False
+        calc_stats = False
+        remove_gdfs = False
+    else:
+        largest_component = True
+        simplify = True
+        gen_adjmtx = False
+        gen_matrix = True
+        save_simplified = True
+        calc_stats = True
+        remove_gdfs = True
     
     # create network
     net = spgh.SpaghettiNetwork(segmdata=initial, sid_name=NTW_SEGM_ID_NAME,
@@ -296,18 +330,22 @@ except FileNotFoundError:
                                 mtfcc_split_grp=SPLIT_GRP, mtfcc_ramp=RAMP,
                                 mtfcc_split_by=SPLIT_BY, mtfcc_serv=SERV_DR,
                                 skip_restr=SKIP_RESTR, tiger_roads=TIGER_ROADS,
-                                record_components=True, remove_gdfs=True,
-                                largest_component=True, record_geom=True,
-                                calc_len=True, save_full=True,
+                                record_components=True, record_geom=True,
+                                remove_gdfs=remove_gdfs, calc_len=True, 
+                                largest_component=largest_component, 
+                                save_full=True,
                                 full_net_segms=full_segms,
-                                full_net_nodes=full_nodes, calc_stats=True,
-                                simplify=True, save_simplified=True,
+                                full_net_nodes=full_nodes, 
+                                calc_stats=calc_stats,
+                                simplify=simplify,
+                                save_simplified=save_simplified,
                                 simp_net_segms=simplified_segms,
                                 simp_net_nodes=simplified_nodes,
-                                gen_matrix=True, mtx_to_csv=c_net,
-                                gen_adjmtx=True, algo='dijkstra')
+                                gen_matrix=gen_matrix, mtx_to_csv=c_net,
+                                gen_adjmtx=gen_adjmtx, algo='dijkstra')
     spgh.dump_pickled(net, c_net, pickle_name='Network')
 utils.time_phase(phase=phase, end=phase_start)
+
 #'''
 
 #--------------------------------------------------------------- Phase 4
@@ -322,6 +360,8 @@ elif STUDY_AREA in ['Test_Tract_Leon_FL', 'Leon_FL'] and not IN_RDC:
     small_unit = 'parcels'
 elif STUDY_AREA in ['Test_Tract_Leon_FL', 'Leon_FL'] and IN_RDC:
     small_unit = 'households'
+elif STUDY_AREA == 'Test_Sine_Leon_FL':
+    small_unit = None
 else:
     raise RunTimeError('`small_unit` not defined.')
 
@@ -342,6 +382,17 @@ if STUDY_AREA == 'Test_Grid_Leon_FL':
     non_geographic_units = []
     geographic_units = geographic_units[-2:]
     proj_init = WGS84
+
+if STUDY_AREA == 'Test_Sine_Leon_FL':
+    LVOR_OFFSET = .01
+    LVOR_PNT_RHO = 3000
+    proj_init = WGS84
+    
+    dwfs.sine_voronoi(net, alloc_dir=c_alc,
+                      vor_offset=LVOR_OFFSET, vor_rho=LVOR_PNT_RHO)
+    
+    figplot.ch2_lvd_pp2n(LVOR_PNT_RHO)
+
 
 # -- set high-precision representation methods
 representation_methods = REPRESENTATION[1:]
@@ -379,18 +430,12 @@ dwfs.snap_obsvs(net, segm_file=segm_file, clean=clean,
                 restrict_col=ATTR1, restrict=SNAP_RESTRICT,
                 snap_to=SNAP_METHOD, representation=REPRESENTATION,
                 pp2n=PP2N_OFFSET, va2n=LVOR_PNT_RHO, small_unit=small_unit)
-
-
-# seg weights summary stats... ##############################################################################
-
 utils.time_phase(phase=phase, end=phase_start)
-
 #'''
-
 
 #'''
 #--------------------------------------------------------------- Phase 6
-phase = '6' # PHASE 5: Calculate all cost matrices
+phase = '6' # PHASE 6: Calculate all cost matrices
 phase_start = utils.time_phase(phase=phase, start=True, study_area=STUDY_AREA)
 
 segm_file = None
@@ -400,24 +445,67 @@ except NameError:
     net = spgh.load_pickled_network(c_net)
 
 dwfs.matrix_calc(net, segm_file=segm_file, clean=clean, df_to_csv=True,
-                 mtx_to_csv=False, nearest_to_pickle=True, in_rdc=IN_RDC,
+                 mtx_to_csv=False, nearest_to_pickle=False, in_rdc=IN_RDC,
                  snap_to=SNAP_METHOD, representation=REPRESENTATION,
                  geographic_units=unit_representation, small_unit=small_unit,
                  non_geographic_units=non_geographic_units,
                  pp2n=PP2N_OFFSET, va2n=LVOR_PNT_RHO)
 utils.time_phase(phase=phase, end=phase_start)
+#'''
 
+#--------------------------------------------------------------- Phase 6.1
+phase = '6.1' # PHASE 6.1: segment to segment
+phase_start = utils.time_phase(phase=phase, start=True, study_area=STUDY_AREA)
+
+if STUDY_AREA == 'Leon_FL':
+    sa_ = None
+    to_fs = True
+else: 
+    sa_ = STUDY_AREA
+    #to_fs = True############################################################################
+    to_fs = False##########################################################################
+    
+dwfs.segment_midpoints(area_prefix=sa_, obs_dir=c_obs, cen_dir=c_cen,
+                       net_dir=c_net, mtx_dir=c_cmx, alc_dir=c_alc,
+                       restrict=SNAP_RESTRICT, mtfcc=ATTR1,
+                       sid=NTW_SEGM_ID_NAME, xyid=XYID, geo_col=GEOMETRY,
+                       to_fs=to_fs)
+utils.time_phase(phase=phase, end=phase_start)
+
+#'''
 #--------------------------------------------------------------- Phase 7
+phase = '7' # PHASE 7: Hard code plots
+phase_start = utils.time_phase(phase=phase, start=True, study_area=STUDY_AREA)
 
-'''
+if STUDY_AREA == 'Test_Grid_Leon_FL':
+    figplot.ch2_grid_plots()
+
+if STUDY_AREA == 'Test_Tract_Leon_FL':
+    figplot.ch2_tract_plots(to_fs=to_fs)
+
+if STUDY_AREA == 'Leon_FL':
+    figplot.ch3_plots(to_fs=to_fs)
+    figplot.ch4_plots(to_fs=to_fs)
+    
+
+utils.time_phase(phase=phase, end=phase_start)
+#'''
+
+#'''
 #--------------------------------------------------------------- Phase 8
-# Facility Location
-if not IN_RDC
-    dwfs.facility_location(
+phase = '8' # PHASE 8: Summary Stats
+phase_start = utils.time_phase(phase=phase, start=True, study_area=STUDY_AREA)
 
-# solve times plots?
-'''
+if STUDY_AREA == 'Test_Grid_Leon_FL':
+    sumstat.ch2_table1()
 
+if STUDY_AREA == 'Test_Tract_Leon_FL':
+    sumstat.ch2_table2_table3(STUDY_AREA, chapter='2')
+
+if STUDY_AREA == 'Leon_FL':
+    sumstat.ch2_table2_table3(STUDY_AREA, chapter='3')
+
+utils.time_phase(phase=phase, end=phase_start)
 
 
 print('::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::')

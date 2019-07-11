@@ -470,14 +470,15 @@ class SpaghettiNetwork:
                                        col='CC', data=self.node_cc)
         
         # Extract largest CCs
-        # largest CC by count (nodes & segments) -- and return small keys
-        self.largest_segm_cc,\
-        segm_smallkeys = sauce.get_largest_cc(self.segm_cc, smallkeys=True)
-        self.largest_node_cc,\
-        node_smallkeys = sauce.get_largest_cc(self.node_cc, smallkeys=True)
+        if largest_cc:
+            # largest CC by count (nodes & segments) -- and return small keys
+            self.largest_segm_cc,\
+            segm_smallkeys = sauce.get_largest_cc(self.segm_cc, smallkeys=True)
+            self.largest_node_cc,\
+            node_smallkeys = sauce.get_largest_cc(self.node_cc, smallkeys=True)
         
-        # Keep on the largest connected component
-        sauce.update_adj(self, segm_smallkeys, node_smallkeys)
+            # Keep on the largest connected component
+            sauce.update_adj(self, segm_smallkeys, node_smallkeys)
         
         # Count connected components in network
         self.n_edge_cc = len(self.segm2segm)
@@ -657,6 +658,8 @@ class SpaghettiNetwork:
             # all euclidean shortest paths
             self.d_euc = self.n2n_euclidean.sum()
             self.circuity = self.d_net / self.d_euc
+            
+            delattr(self, 'n2n_euclidean')
         
         if validate_symmetry:
             # validate symmetry
@@ -717,7 +720,7 @@ class SpaghettiPointPattern():
     def __init__(self, df=None, df_name=None, df_key=None, df_pop=None,
                  net_segms=None, net=None, simulated=False,
                  kd_tree=None, k=5, tol=.01, snap_to='segments',
-                 no_pop=['FireStations', 'FireStationsSynthetic']):
+                 no_pop=['FireStations', 'FireStationsSynthetic', 'SegmMidpoints']):
         """
         Parameters
         ----------
@@ -1083,14 +1086,15 @@ def load_pickled(pickle_jar, pickle_name='Network'):
     
     in_file = pickle_jar + pickle_name + '.pkl'
     if not os.path.exists(in_file):
-        raise FileNotFoundError
+        raise FileNotFoundError(in_file)
     
     sys_os = platform.system()
     bytes_maximum = 2**31 - 1
     obj_in_bytes_in = bytearray(0)
     obj_size = os.path.getsize(in_file)
-    if (obj_size <= bytes_maximum and sys_os == 'Darwin')\
-    or sys_os != 'Darwin':
+    #if (obj_size <= bytes_maximum and sys_os == 'Darwin')\
+    #or sys_os != 'Darwin':
+    if sys_os != 'Darwin':
         pickled_obj = open(in_file, 'rb')
         return pickle.load(pickled_obj)
     

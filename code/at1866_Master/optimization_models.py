@@ -7,6 +7,7 @@ import time
 
 # non-standard library imports
 import geopandas as gpd
+import pandas as pd
 from libpysal import cg
 import matplotlib.pyplot as plt
 import matplotlib.lines as mlines
@@ -14,6 +15,7 @@ import matplotlib.patches as mpatches
 import numpy as np
 from PIL import Image
 import pulp
+import gurobi as grb
 import seaborn as sns
 from shapely.geometry import Point, LineString, MultiLineString
 
@@ -54,8 +56,8 @@ class FacilityLocationModel:
     frac_gap : float
         CBC param. fractional gap tolerence for solution.
     time_limit : {int, float}
-        CBC param. time limit for solution in minutes, which
-        is then convertered to seconds when passed to CBC.
+        time limit for solution in minutes, which
+        is then convertered to seconds when passed to solver.
     
     Methods
     -------
@@ -142,11 +144,24 @@ class FacilityLocationModel:
     
     def __init__(self, locmod, name=None, ai=None, cij=None, s=None,
                  p=None, write_lp=None, print_sol=True, cli_dvs=None,
-                 fac_dvs=None, frac_gap=None, time_limit=None, solver='CBC',
+                 fac_dvs=None, frac_gap=None, time_limit=None,
+                 solver_name='CBC',
                  origin_service=True):
+        
+        pd_types = [gpd.geodataframe.GeoDataFrame,
+                    gpd.geoseries.GeoSeries,
+                    pd.core.series.Series]
+        
+        self.cbc_variants = ['PULP', 'CBC', 'COIN',
+                             'COIN-CBC', 'PULP_CBC_CMD']
         
         # Set model information
         self.locmod = locmod
+        self.solver_name = solver_name
+        
+        if self.solver_name.upper() == 'GUROBI':
+            self.__gurobi_solution_codes__()
+        
         if name:
             self.name = name
         else:
@@ -173,8 +188,14 @@ class FacilityLocationModel:
         
         # demand parameter
         if ai is not None:
-            self.ai = ai.values
+            if type(ai) in pd_types:
+                self.ai = ai.values
+            elif type(ai) == list:
+                self.ai = np.array(ai) 
+            else:
+                self.ai = ai
             self.ai_sum = ai.sum()
+            self.flat_ai = self.ai.flatten()
             
             # weighted demand
             self.sij = np.multiply(self.ai, self.cij)
@@ -189,9 +210,24 @@ class FacilityLocationModel:
         # if client and service decision variable names are passed
         # in the class, set them as attributes here.s
         if fac_dvs is not None:
-            self.fac_dvs = list(fac_dvs)
+            if type(fac_dvs) in pd_types:
+                self.iloc2fac = dict(zip(fac_dvs.index, fac_dvs.values))
+                self.fac_dvs = list(fac_dvs)
+            else:
+                self.fac_dvs = list(fac_dvs)
+                self.iloc2fac = dict(zip(list(self.r_fac),
+                                         self.fac_dvs))
+            self.fac2iloc = {v:k for k,v in self.iloc2fac.items()}
+        
         if cli_dvs is not None:
-            self.cli_dvs = list(cli_dvs)
+            if type(cli_dvs) in pd_types:
+                self.iloc2cli = dict(zip(cli_dvs.index, cli_dvs.values))
+                self.cli_dvs = list(cli_dvs)
+            else:
+                self.cli_dvs = list(cli_dvs)
+                self.iloc2cli = dict(zip(list(self.r_cli),
+                                           self.cli_dvs))
+            self.cli2iloc = {v:k for k,v in self.iloc2cli.items()}
         
         # Set decision variables, constraints, and objective function
         try:
@@ -201,7 +237,7 @@ class FacilityLocationModel:
                                  'not a defined location model.')
         
         # solve
-        self.solve_time = self.optimize(solver=solver, write_lp=write_lp)
+        self.solve_time = self.optimize(write_lp=write_lp, print_sol=print_sol)
         
         # records seleted decision variables
         self.record_decisions_time = self.record_decisions()
@@ -216,6 +252,74 @@ class FacilityLocationModel:
         # print results
         if print_sol:
             self.print_results()
+    
+    
+    def __gurobi_solution_codes__(self):
+        """Status and description of Gurobi solution codes
+        """
+        self.gurobi_solution_codes = \
+            {1:{'status':'LOADED',
+                'desc':'Model is loaded,'\
+                        + 'but no solution information is available.'},
+             2:{'status':'OPTIMAL',
+                'desc':'Model was solved to optimality '\
+                       + '(subject to tolerances), '\
+                       + 'and an optimal solution is available.'},
+             3:{'status':'INFEASIBLE',
+                'desc':'Model was proven to be infeasible.'},
+             4:{'status':'INF_OR_UNBD',
+                'desc':'Model was proven to be either infeasible or unbounded. '\
+                       + 'To obtain a more definitive conclusion, set '\
+                       + 'the DualReductions parameter to 0 and reoptimize.'},
+             5:{'status':'UNBOUNDED',
+                'desc':'Model was proven to be unbounded. '\
+                       + 'Important note: an unbounded status '\
+                       + 'indicates the presence of an unbounded '\
+                       + 'ray that allows the objective to '\
+                       + 'improve without limit. '\
+                       + 'It says nothing about whether the model '\
+                       + 'has a feasible solution. '\
+                       + 'If you require information on feasibility, '\
+                       + 'you should set the objective to zero and reoptimize.'},
+             6:{'status':'CUTOFF',
+                'desc':'Optimal objective for model was proven to be '\
+                       + 'worse than the value specified in the '\
+                       + 'Cutoff parameter. No solution information is available.'},
+             7:{'status':'ITERATION_LIMIT',
+                'desc':'Optimization terminated because the total '\
+                       + 'number of simplex iterations performed exceeded '\
+                       + 'the value specified in the IterationLimit parameter, '\
+                       + 'or because the total number of barrier iterations '\
+                       + 'exceeded the value specified in the BarIterLimitparameter.'},
+             8:{'status':'NODE_LIMIT',
+                'desc':'Optimization terminated because the total '\
+                       + 'number of branch-and-cut nodes explored '\
+                       + 'exceeded the value specified in the NodeLimit parameter.'},
+             9:{'status':'TIME_LIMIT',
+                'desc':'Optimization terminated because the time '\
+                       + 'expended exceeded the value specified '\
+                       + 'in the TimeLimit parameter.'},
+             10:{'status':'SOLUTION_LIMIT',
+                 'desc':'Optimization terminated because the number '\
+                         + 'of solutions found reached the value '\
+                         + 'specified in the SolutionLimit parameter.'},
+             11:{'status':'INTERRUPTED',
+                 'desc':'Optimization was terminated by the user.'},
+             12:{'status':'NUMERIC',
+                 'desc':'Optimization was terminated due '\
+                        + 'to unrecoverable numerical difficulties.'},
+             13:{'status':'SUBOPTIMAL',
+                 'desc':'Unable to satisfy optimality tolerances; '\
+                        + 'a sub-optimal solution is available.'},
+             14:{'status':'INPROGRESS',
+                 'desc':'An asynchronous optimization call was made, '\
+                        + 'but the associated optimization run '\
+                        + 'is not yet complete.'},
+             15:{'status':'USER_OBJ_LIMIT',
+                 'desc':'User specified an objective limit '\
+                        + '(a bound on either the best objective '\
+                        + 'or the best bound), and that limit has been reached.'}
+            }
     
     
     def timer(timed_function):
@@ -357,64 +461,115 @@ class FacilityLocationModel:
         """Create a problem instance and set objective sense.
         """
         
-        # set sense
-        if self.locmod == 'mclp':
-            sense = pulp.LpMaximize
-        else:
-            sense = pulp.LpMinimize
+        # pulp / Coin-OR
+        if self.solver_name.upper() in self.cbc_variants:
+            # set sense
+            if self.locmod == 'mclp':
+                sense = pulp.LpMaximize
+            else:
+                sense = pulp.LpMinimize
+            
+            # create problem instance
+            self.problem = pulp.LpProblem(self.name, sense)
         
-        # create problem instance
-        self.problem = pulp.LpProblem(self.name, sense)
+        # Gurobi
+        elif self.solver_name.upper() == 'GUROBI':
+            
+            self.problem = grb.Model(self.name)
+            
+            # set sense
+            if self.locmod == 'mclp':
+                self.problem.ModelSense = -1
     
     
     def add_vars(self):
         """Add variables to a model.
         """
         
-        # facility decision variables
-        # variable names
-        if not hasattr(self, 'fac_dvs'):
-            self.fac_dvs = ['y%s' % i for i in self.r_fac]
-        
-        # pulp.LpVariable objects
-        self.fac_vars = [pulp.LpVariable(var_name, cat='Binary')\
-                                            for var_name in self.fac_dvs]
-        
-        # add variables
-        self.problem.addVariables(v for v in self.fac_vars)
-        
-        # client decision variables
-        # variable names
-        if not hasattr(self, 'cli_dvs'):
-            self.cli_dvs = ['x%s' % j for j in self.r_cli]
-        
-        if self.locmod == 'mclp':
+        # Facility decision variables
+        # pulp / Coin-OR
+        if self.solver_name.upper() in self.cbc_variants:
+            # variable names
+            if not hasattr(self, 'fac_dvs'):
+                self.fac_dvs = ['y%s' % i for i in self.r_fac]
             # pulp.LpVariable objects
-            self.cli_vars = [pulp.LpVariable(var_name, cat='Binary')\
-                                    for var_name in self.cli_dvs]
+            self.fac_vars = [pulp.LpVariable(var_name, cat='Binary')\
+                                                for var_name in self.fac_dvs]
             # add variables
-            self.problem.addVariables(v for v in self.cli_vars)
+            self.problem.addVariables(v for v in self.fac_vars)
         
-        if self.locmod in ['pmp', 'pcp']:
-            self.cli_decisions = [['x%s_%s' % (i,j) for i in self.r_fac]\
-                                                    for j in self.r_cli]\
-            # pulp.LpVariable objects
-            self.cli_vars = [[pulp.LpVariable(var_name, cat='Binary')\
-                                             for var_name in var_row]\
-                                             for var_row in self.cli_decisions]
+        # Gurobi
+        if self.solver_name.upper() == 'GUROBI':
             
-            # add variables
-            self.problem.addVariables(var for var_row in self.cli_vars\
-                                          for var in var_row)
+            self.fac_vars = self.problem.addVars(self.r_fac,
+                                                 vtype=grb.GRB.BINARY,
+                                                 name='y')
         
-        # minimized maximum variable
-        if self.locmod == 'pcp':
-            self.W = pulp.LpVariable('W', cat='Continuous')
-            self.problem.addVariable(self.W)
-        
-        self.fac_vars = np.array(self.fac_vars)
-        if hasattr(self, 'cli_vars'):
-            self.cli_vars = np.array(self.cli_vars)
+        # Client decision variables
+        # pulp / Coin-OR
+        if self.solver_name.upper() in self.cbc_variants:
+            # variable names
+            if not hasattr(self, 'cli_dvs'):
+                self.cli_dvs = ['x%s' % j for j in self.r_cli]
+            
+            # MCLP
+            if self.locmod == 'mclp':
+                # pulp.LpVariable objects
+                self.cli_vars = [pulp.LpVariable(var_name, cat='Binary')\
+                                        for var_name in self.cli_dvs]
+                # add variables
+                self.problem.addVariables(v for v in self.cli_vars)
+            
+            # PMP/PCP
+            if self.locmod in ['pmp', 'pcp']:
+                self.cli_decisions = [['x%s_%s' % (i,j) for i in self.r_fac]\
+                                                        for j in self.r_cli]
+                # pulp.LpVariable objects
+                self.cli_vars = [[pulp.LpVariable(var_name, cat='Binary')\
+                                                 for var_name in var_row]\
+                                                 for var_row in self.cli_decisions]
+                # add variables
+                self.problem.addVariables(var for var_row in self.cli_vars\
+                                              for var in var_row)
+                # minimized maximum variable
+                if self.locmod == 'pcp':
+                    self.W = pulp.LpVariable('W', cat='Continuous')
+                    self.problem.addVariable(self.W)
+            
+            self.fac_vars = np.array(self.fac_vars)
+            if hasattr(self, 'cli_vars'):
+                self.cli_vars = np.array(self.cli_vars)
+            
+        # Gurobi
+        if self.solver_name.upper() == 'GUROBI':
+            
+            # MCLP
+            if self.locmod == 'mclp':
+                self.cli_vars = self.problem.addVars(self.n_cli,
+                                                     vtype=grb.GRB.BINARY,
+                                                     obj=self.flat_ai,
+                                                     name="x")
+            
+            # PMP/PCP
+            if self.locmod in ['pmp', 'pcp']:
+                if self.locmod == 'pmp':
+                    obj = self.sij
+                elif self.locmod == 'pcp':
+                    obj = self.cij
+                
+                if obj.shape[1] == 1:
+                    obj = obj.flatten()
+                
+                self.cli_vars = self.problem.addVars(self.n_fac, self.n_cli,
+                                                     vtype=grb.GRB.BINARY,
+                                                     obj=obj, name='x')
+                
+                # minimized maximum variable
+                if self.locmod == 'pcp':
+                    self.W = self.problem.addVar(vtype=grb.GRB.CONTINUOUS,
+                                                 name='W')
+            
+            self.problem.update()
     
     
     def add_constrs(self, constr=None):
@@ -444,71 +599,139 @@ class FacilityLocationModel:
             Default is None.
         """
         
-        # 1 - set covering constraints
-        if constr == 1:
-            constrs = [pulp.lpSum(self.aij[i,j] * self.fac_vars[i]\
-                                       for i in self.r_fac) >= 1\
-                                       for j in self.r_cli]
+        # pulp / Coin-OR
+        if self.solver_name.upper() in self.cbc_variants:
+            # 1 - set covering constraints
+            if constr == 1:
+                constrs = [pulp.lpSum(self.aij[i,j] * self.fac_vars[i]\
+                                           for i in self.r_fac) >= 1\
+                                           for j in self.r_cli]
+            
+            # 2 - assignment constraints
+            elif constr == 2:
+                constrs = [pulp.lpSum(self.cli_vars[j][i]
+                                      for i in self.r_fac) == 1\
+                                      for j in self.r_cli]
+            
+            # 3 - facility constraint
+            elif constr == 3:
+                constrs = [pulp.lpSum(self.fac_vars[i]\
+                                                   for i in self.r_fac) == self.p]
+            
+            # 4 - opening constraints
+            elif constr == 4:
+                constrs = [self.fac_vars[i] >= self.cli_vars[j][i]\
+                           for j in self.r_cli for i in self.r_fac]
+            
+            # 5 - minimax constraints
+            elif constr == 5:
+                constrs = [pulp.lpSum(self.cij[i,j]\
+                                      * self.cli_vars.T[i][j]
+                                      for i in self.r_fac) <= self.W\
+                                      for j in self.r_cli]
+            
+            # 6 - max coverage constraints
+            elif constr == 6:
+                constrs = [pulp.lpSum(self.aij[i,j]\
+                                      * self.fac_vars[i]\
+                                      for i in self.r_fac)\
+                                      >= self.cli_vars[j]
+                                      for j in self.r_cli]
+            
+            [self.problem.addConstraint(c) for c in constrs]
         
-        # 2 - assignment constraints
-        elif constr == 2:
-            constrs = [pulp.lpSum(self.cli_vars[j][i]
-                                  for i in self.r_fac) == 1\
-                                  for j in self.r_cli]
-        
-        # 3 - facility constraint
-        elif constr == 3:
-            constrs = [pulp.lpSum(self.fac_vars[i]\
-                                               for i in self.r_fac) == self.p]
-        
-        # 4 - opening constraints
-        elif constr == 4:
-            constrs = [self.fac_vars[i] >= self.cli_vars[j][i]\
-                       for j in self.r_cli for i in self.r_fac]
-        
-        # 5 - minimax constraints
-        elif constr == 5:
-            constrs = [pulp.lpSum(self.cij[i,j]\
-                                  * self.cli_vars.T[i][j]
-                                  for i in self.r_fac) <= self.W\
-                                  for j in self.r_cli]
-        
-        # 6 - max coverage constraints
-        elif constr == 6:
-            constrs = [pulp.lpSum(self.aij[i,j]\
-                                  * self.fac_vars[i]\
-                                  for i in self.r_fac)\
-                                  >= self.cli_vars[j]
-                                  for j in self.r_cli]
-        
-        [self.problem.addConstraint(c) for c in constrs]
+        # Gurobi
+        if self.solver_name.upper() == 'GUROBI':
+            # 1 - set covering constraints
+            if constr == 1:
+                for j in self.r_cli:
+                    self.problem.addConstr(grb.quicksum(self.aij[i,j]
+                                                        * self.fac_vars[i]
+                                                        for i in self.r_fac)\
+                                                        >= 1)
+            
+            # 2 - assignment constraints
+            if constr == 2:
+                self.problem.addConstrs(self.cli_vars.sum('*', j) == 1\
+                                                    for j in self.r_cli)
+            
+            # 3 - facility constraint
+            if constr == 3:
+                self.problem.addConstr(self.fac_vars.sum('*') == self.p)
+            
+            # 4 - opening constraints
+            if constr == 4:
+                self.problem.addConstrs(self.fac_vars.sum(i)\
+                                        - self.cli_vars.sum(i,j) >= 0\
+                                        for i in self.r_fac\
+                                        for j in self.r_cli)
+            
+            # 5 - minimax constraints
+            if constr == 5:
+                self.problem.addConstrs(grb.quicksum(self.cli_vars[i,j].Obj
+                                        * self.cli_vars[i,j]
+                                        for i in self.r_fac) <= self.W
+                                        for j in self.r_cli)
+            
+            # 6 - max coverage constraints
+            if constr == 6:
+                for j in self.r_cli:
+                    self.problem.addConstr(grb.quicksum(self.aij[i,j]\
+                                           * self.fac_vars[i]\
+                                           for i in self.r_fac)\
+                                           >= self.cli_vars[j])
+                                           
+            self.problem.update()
     
     
     def add_obj(self):
         """ Add an objective function to a model.
         """
         
-        if self.locmod == 'lscp':
-            self.problem.setObjective(pulp.lpSum(self.fac_vars[j]\
-                                                 for j in self.r_fac))
+        # pulp / Coin-OR
+        if self.solver_name.upper() in self.cbc_variants:
+            if self.locmod == 'lscp':
+                self.problem.setObjective(pulp.lpSum(self.fac_vars[j]\
+                                                       for j in self.r_fac))
+            
+            elif self.locmod == 'mclp':
+                self.problem.setObjective(pulp.lpSum(self.flat_ai[j]\
+                                                     * self.cli_vars[j]
+                                                     for j in self.r_cli))
+            
+            elif self.locmod == 'pmp':
+                self.problem.setObjective(pulp.lpSum(self.sij[i,j]\
+                                          * self.cli_vars.T[i][j]\
+                                          for j in self.r_cli\
+                                          for i in self.r_fac))
+            
+            elif self.locmod == 'pcp':
+                self.problem.setObjective(self.W)
         
-        elif self.locmod == 'mclp':
-            flat_ai = self.ai.flatten()
-            self.problem.setObjective(pulp.lpSum(flat_ai[j] * self.cli_vars[j]
-                                                 for j in self.r_cli))
-        
-        elif self.locmod == 'pmp':
-            self.problem.setObjective(pulp.lpSum(self.sij[i,j]\
-                                      * self.cli_vars.T[i][j]\
-                                      for j in self.r_cli\
-                                      for i in self.r_fac))
-        
-        elif self.locmod == 'pcp':
-            self.problem.setObjective(self.W)
+        # Gurobi
+        if self.solver_name.upper() == 'GUROBI':
+            self.problem.update()
+            
+            if self.locmod == 'lscp':
+                self.problem.setObjective(self.fac_vars.sum("*"))
+                
+            elif self.locmod == 'mclp':
+                self.problem.setObjective(grb.quicksum(self.cli_vars[j].Obj\
+                                            * self.cli_vars[j]\
+                                            for j in self.r_cli))
+                
+            elif self.locmod == 'pmp':
+                self.problem.setObjective(grb.quicksum(self.cli_vars[i,j].Obj\
+                                          * self.cli_vars[i,j]\
+                                          for i in self.r_fac\
+                                          for j in self.r_cli))
+                
+            elif self.locmod == 'pcp':
+                self.problem.setObjective(self.W)
     
     
     @timer
-    def optimize(self, solver=None, write_lp=None):
+    def optimize(self, write_lp=None, print_sol=False):
         """ Solve the model.
         
         Parameters
@@ -516,20 +739,84 @@ class FacilityLocationModel:
         write_lp : str
             write out the linear programming formulation
         """
-        cbc_variants = ['PULP', 'CBC', 'COIN', 'COIN-CBC', 'PULP_CBC_CMD']
         
-        if solver.upper() in cbc_variants:
+        # pulp / Coin-OR
+        if self.solver_name.upper() in self.cbc_variants:
             self.solver = pulp.PULP_CBC_CMD
-            self.solver_name = solver
-        
-        self.problem.solve(self.solver(maxSeconds=self.time_limit,
-                                             fracGap=self.frac_gap))
-        
-        # linear programming formulation
-        if write_lp:
-            self.problem.writeLP(write_lp+'.lp')
-        
-        self.obj_val = self.problem.objective.value()
+            
+            self.problem.solve(self.solver(maxSeconds=self.time_limit,
+                                                 fracGap=self.frac_gap))
+            
+            # issue statement if model not optimal
+            self.status_int = self.problem.status
+            self.status = pulp.LpStatus[self.status_int]
+            
+            # linear programming formulation
+            if write_lp:
+                self.problem.writeLP(write_lp+'.lp')
+            
+            self.obj_val = self.problem.objective.value()
+            
+        # Gurobi
+        elif self.solver_name.upper() == 'GUROBI':
+            
+            if self.time_limit:
+                self.problem.setParam('TimeLimit', self.time_limit)
+            
+            self.problem.optimize()
+            
+            # issue statement if model not optimal
+            self.status_int = self.problem.status
+            self.status = self.gurobi_solution_codes[self.status_int]['status']
+            if print_sol:
+                print('---------------------------------- 1')
+                print(self.status)
+                print(self.gurobi_solution_codes[self.status_int]['desc'])
+            
+            if self.status.upper() == 'INFEASIBLE':
+                
+                minrelax = False
+                vrelax = False
+                crelax = True
+                self.problem.feasRelaxS(1, minrelax, vrelax, crelax)
+                self.problem.optimize()
+                
+                self.status_int = self.problem.status
+                self.status = self.gurobi_solution_codes[self.status_int]['status']
+                if print_sol:
+                    print('---------------------------------- 2')
+                    print(self.status)
+                    print(self.gurobi_solution_codes[self.status_int]['desc'])
+                
+                
+                if self.status.upper() == 'INFEASIBLE':
+                    
+                    minrelax = True
+                    vrelax = False
+                    crelax = True
+                    self.problem.feasRelaxS(1, minrelax, vrelax, crelax)
+                    self.problem.optimize()
+                    
+                    self.status_int = self.problem.status
+                    self.status = self.gurobi_solution_codes[self.status_int]['status']
+                    if print_sol:
+                        print('---------------------------------- 3')
+                        print(self.status)
+                        print(self.gurobi_solution_codes[self.status_int]['desc'])
+                        
+            
+            self.status_int = self.problem.status
+            self.status = self.gurobi_solution_codes[self.status_int]['status']
+            if print_sol:
+                print('---------------------------------- Final')
+                print(self.status)
+                print(self.gurobi_solution_codes[self.status_int]['desc'])
+            
+            self.obj_val = self.problem.ObjVal
+            
+            # linear programming formulation
+            if write_lp:
+                self.problem.write(write_lp+'.lp')
     
     
     @timer
@@ -538,12 +825,6 @@ class FacilityLocationModel:
         folowing optimization.
         """
         
-        # facility-to-dataframe index location lookup
-        self.fac2iloc = {v.name: idx for idx, v\
-                                     in enumerate(self.fac_vars)}
-        
-        # client-to-dataframe index location lookup
-        self.cli2iloc = {}
         
         # facility-to-client lookup
         self._fac2cli()
@@ -564,27 +845,54 @@ class FacilityLocationModel:
         """
         
         self.fac2cli = {}
-        for i in self.r_fac:
-            if self.fac_vars[i].value() > 0:
-                jvar = str(self.fac_dvs[i])
-                self.fac2cli[jvar] = []
-                for j in self.r_cli:
-                    ivar = None
-                    if self.locmod == 'lscp':
-                        if self.aij[i,j] > 0:
-                            ivar = str(self.cli_dvs[j])
-                            self.fac2cli[jvar].append(ivar)
-                    elif self.locmod == 'mclp':
-                        if self.cli_vars[j].value() > 0:
+        
+        # pulp / Coin-OR
+        if self.solver_name.upper() in self.cbc_variants:
+            for i in self.r_fac:
+                if self.fac_vars[i].value() > 0:
+                    jvar = str(self.fac_dvs[i])
+                    self.fac2cli[jvar] = []
+                    for j in self.r_cli:
+                        ivar = None
+                        if self.locmod == 'lscp':
                             if self.aij[i,j] > 0:
                                 ivar = str(self.cli_dvs[j])
                                 self.fac2cli[jvar].append(ivar)
-                    else:
-                        if self.cli_vars[j][i].value() > 0:
-                            ivar = str(self.cli_dvs[j])
-                            self.fac2cli[jvar].append(ivar)
-                    if ivar:
-                        self.cli2iloc[ivar] = j
+                        elif self.locmod == 'mclp':
+                            if self.cli_vars[j].value() > 0:
+                                if self.aij[i,j] > 0:
+                                    ivar = str(self.cli_dvs[j])
+                                    self.fac2cli[jvar].append(ivar)
+                        else:
+                            if self.cli_vars[j][i].value() > 0:
+                                ivar = str(self.cli_dvs[j])
+                                self.fac2cli[jvar].append(ivar)
+                        if ivar:
+                            self.cli2iloc[ivar] = j
+        
+        # Gurobi
+        if self.solver_name.upper() == 'GUROBI':
+            for i in self.r_fac:
+                if self.fac_vars[i].X > 0:
+                    jvar = self.iloc2fac[i]
+                    self.fac2cli[jvar] = []
+                    for j in self.r_cli:
+                        ivar = None
+                        if self.locmod == 'lscp':
+                            if self.aij[i,j] > 0:
+                                ivar = self.iloc2cli[j]
+                                self.fac2cli[jvar].append(ivar)
+                        elif self.locmod == 'mclp':
+                            if self.cli_vars[j].X > 0:
+                                if self.aij[i,j] > 0:
+                                    ivar = self.cli_dvs[j]
+                                    self.fac2cli[jvar].append(ivar)
+                        else:
+                            if self.cli_vars[i,j].X > 0:
+                                ivar = self.iloc2cli[j]
+                                self.fac2cli[jvar].append(ivar)
+                        if ivar:
+                            self.cli2iloc[ivar] = j
     
     
     def _cli2fac(self):
@@ -653,11 +961,11 @@ class FacilityLocationModel:
         """
         
         print('\nModel:\t%s' % self.name)
-        
-        # issue statement if model not optimal
-        self.status_int = self.problem.status
-        self.status = pulp.LpStatus[self.status_int]
-        if self.status_int != 1:
+        print(self.status)
+        print(self.gurobi_solution_codes[self.status_int]['desc'])
+        print(self.ncov2ncli.items())
+        if (self.status_int != 1 and self.solver_name.upper() in self.cbc_variants)\
+        or (self.status_int != 2 and self.solver_name.upper() == 'GUROBI'):
             warning = '  !!! WARNING!!!  '
             print('see [' + warning + '] below')
             print('\t%s model is %s.' % (self.name, self.status))
@@ -712,10 +1020,16 @@ class FacilityLocationModel:
         print('Total Time:\t%s minutes' % round(self.total_time, 3))
         if self.time_limit:
             print('Time Limit:\t%s minutes' % str(self.time_limit/60.))
-        try:
-            self.gap = self.problem.infeasibilityGap()
-        except ValueError:
-            self.gap = 'sub-optimal solution'
+        # pulp / Coin-OR
+        if self.solver_name.upper() in self.cbc_variants:
+            try:
+                self.gap = self.problem.infeasibilityGap()
+            except ValueError:
+                self.gap = 'sub-optimal solution'
+        # Gurobi
+        elif self.solver_name.upper() == 'GUROBI':
+            self.gap = self.problem.MIPGap
+        
         print('Infeas. Gap:\t%s' % self.gap)
         if self.locmod == 'pmp':
             print('Mean distance per',
@@ -723,6 +1037,7 @@ class FacilityLocationModel:
         if self.locmod == 'mclp':
             print('Percent of %i' % self.ai_sum,
                   '(population) covered: %f' % self.perc_served)
+        print('============================================\n\n')
     
     
     def create_cli2fac_sp(self, tree):
@@ -745,6 +1060,30 @@ class FacilityLocationModel:
                     self.cli2fac_sp[fac,cli] = tree[(cliloc, facloc)]
                 except:
                     self.cli2fac_sp[fac,cli] = ('snap', 'snap')
+
+
+def pickle_gurobi_model(name, path, write=True, model=None):
+    """
+    """
+    path_name = path + name
+    
+    if write:
+        model.write(path_name+'.mps')
+        # optionally save state:
+        # parameters:
+        model.write(path_name+'.prm')
+        # for MIP:
+        model.write(path_name+'.mst') # MIP start
+        # for LP:
+        try:
+            model.write(path_name+'.bas') # LP basis
+        except grb.GurobiError:
+            pass
+    else:
+        #To read, do something like the following:
+        model = grb.read(path_name+'.mps')
+        model.read(path_name+'.prm')
+        model.read(path_name+'.mst') # MIP start
 
 
 def element_calculator(locmod, rows, cols=None, print_count=False):
@@ -1063,10 +1402,13 @@ def distance_analytics(mdls, df_only=False, style_only=False,
     # set index as stat names
     df.set_index(idx_name, inplace=True)
     
+    df = _reindex(df)
+    
     # stylize
-    cm = sns.light_palette(color, as_cmap=True, reverse=True)
-    style = df.style.set_caption(stats)\
-                    .background_gradient(axis=0, cmap=cm)
+    if style_only:
+        cm = sns.light_palette(color, as_cmap=True, reverse=True)
+        style = df.style.set_caption(stats)\
+                        .background_gradient(axis=0, cmap=cm)
     
     # convert df entry to latex
     if save_as_latex:
@@ -1119,7 +1461,8 @@ def coverage_analytics(mdls, df_only=False, style_only=False,
     """
     
     model_names_base, model_name_map = _map_names(mdls)
-    stats = {'cli_not_cov': 'Client locations *not* covered'}
+    #stats = {'cli_not_cov': 'Client locations *not* covered'}
+    stats = {'0': 'Client locations *not* covered'}
     
     most_coverage = 0
     for m in mdls:
@@ -1129,7 +1472,8 @@ def coverage_analytics(mdls, df_only=False, style_only=False,
     coverage = list(range(1, most_coverage+1))
     
     for cv in coverage:
-        stats['cov_by_%s' % cv] = 'Clients covered by %s facility' % cv
+        #stats['cov_by_%s' % cv] = 'Clients covered by %s facility' % cv
+        stats['%s' % cv] = 'Clients covered by %s facility' % cv
     
     # instantiate dataframe
     df = gpd.GeoDataFrame()
@@ -1157,6 +1501,8 @@ def coverage_analytics(mdls, df_only=False, style_only=False,
     
     # set index as stat names
     df.set_index(idx_name, inplace=True)
+    
+    df = _reindex(df)
     
     # stylize
     cm = sns.light_palette(color, as_cmap=True, reverse=True)
@@ -1319,6 +1665,14 @@ def solution_analytics(mdls, model_type=None, df_only=False, style_only=False,
     if model_type == 'lscp':
          df['obj'] = df['obj'].astype(int)
     
+    df = _reindex(df)
+    
+    df = df.drop(['time_lim', 'gap', 'dims'], axis=1)
+    try:
+        df = df.drop(['ndv=p'], axis=1)
+    except KeyError:
+        pass
+    
     # stylize
     cm = sns.light_palette(good, as_cmap=True, reverse=True)
     style = df.style.set_caption(stats)\
@@ -1401,9 +1755,11 @@ def selection_analytics(mdls, df_only=False, style_only=False, transpose=True,
     
     
     model_names_base, model_name_map = _map_names(mdls)
-    
     # set index and columns in empty dataframe
-    var_index = [v.name for v in mdls[0].fac_vars]
+    try:
+        var_index = [v.name for v in mdls[0].fac_vars]
+    except AttributeError:
+        var_index = [v for v in mdls[0].fac_dvs]
     df = gpd.GeoDataFrame(index=var_index, columns=model_names_base)
     ncols = df.shape[1]
     df.index.name = idx_name
@@ -1435,6 +1791,8 @@ def selection_analytics(mdls, df_only=False, style_only=False, transpose=True,
     else:
         subset = ['$\sum$', '$\%$']
     
+    df = _reindex(df, selection=True)
+    
     # stylize
     cm = sns.light_palette(full_color, as_cmap=True)
     caption = 'Set membership by modeling scenario: '\
@@ -1465,6 +1823,22 @@ def selection_analytics(mdls, df_only=False, style_only=False, transpose=True,
     return df, style
 
 
+def _reindex(df, selection=False):
+    '''
+    '''
+    idx_names = ['pc2nTracts', 'va2nTracts', 'pp2n5.0Tracts', 'pp2n36.0Tracts',
+                'pc2nBlockGroups', 'va2nBlockGroups', 'pp2n5.0BlockGroups', 'pp2n36.0BlockGroups',
+                'pc2nPopulatedBlocks', 'va2nPopulatedBlocks', 'pp2n5.0PopulatedBlocks', 'pp2n36.0PopulatedBlocks',
+                'WeightedParcels']
+    
+    if selection:
+        idx_names += ['$\sum$', '$\%$']
+    
+    df = df.reindex(idx_names)
+    
+    return df
+
+
 def _map_names(mdls):
     """internal function for mapping long to base model names
     
@@ -1481,7 +1855,7 @@ def _map_names(mdls):
     """
     
     long = [m.name for m in mdls]
-    base = [m.name.split('_')[0] for m in mdls]
+    base = [m.name.split('_')[1] for m in mdls]
     name_map = dict(zip(long, base))
     
     return base, name_map

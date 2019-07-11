@@ -8,7 +8,7 @@ import copy, os, re, subprocess, sys, time
 import geopandas as gpd
 import numpy as np
 import pandas as pd
-import pysal as ps
+#import pysal as ps
 import shapely
 
 
@@ -239,7 +239,7 @@ def directory_structure(study_area, data, shps, results, tests=None):
     
     Returns
     -------
-    ini, int, cle, cc, co, cn, cx, rpl, rfl : tuple
+    ini, int, cle, cc, co, cn, cx, rpl, tbl, rfl : tuple
     """
     
     
@@ -258,7 +258,7 @@ def directory_structure(study_area, data, shps, results, tests=None):
         Returns
         -------
         ini, int, cle, cc, co, cn, cx, ca, \
-        rpl, rfl, clean_ss, results_ss : tuple
+        rpl, tbl, rfl, clean_ss, results_ss : tuple
         """
         
         # data directories
@@ -276,11 +276,12 @@ def directory_structure(study_area, data, shps, results, tests=None):
         
         # results sub directories
         rpl = results + 'plots/'
+        tbl = results + 'tables/'
         rfl = results + 'facility_location/'
-        results_ss = [rpl, rfl]
+        results_ss = [rpl, tbl, rfl]
         
         return ini, int, cle, cc, co, cn, cx, ca,\
-               rpl, rfl, clean_ss, results_ss
+               rpl, tbl, rfl, clean_ss, results_ss
     
     
     def _set_dirs(initi, shps, inter, clean, result):
@@ -323,7 +324,9 @@ def directory_structure(study_area, data, shps, results, tests=None):
             # get path names
             ini, int, cle,\
             cc, co, cn, cx, ca,\
-            rpl, rfl, clean_ss, results_ss = _set_paths(test, data, results)
+            rpl, tbl, rfl, clean_ss, results_ss = _set_paths(test,
+                                                             data,
+                                                             results)
             
             # create dirs
             _set_dirs(ini, shps, int, clean_ss, results_ss)
@@ -333,12 +336,12 @@ def directory_structure(study_area, data, shps, results, tests=None):
     # get path names
     ini, int, cle,\
     cc, co, cn, cx, ca,\
-    rpl, rfl, clean_ss, results_ss = _set_paths(study_area, data, results)
+    rpl, tbl, rfl, clean_ss, results_ss = _set_paths(study_area, data, results)
     
     # create dirs
     _set_dirs(ini, shps, int, clean_ss, results_ss)
     
-    return ini, int, cle, cc, co, cn, cx, ca, rpl, rfl
+    return ini, int, cle, cc, co, cn, cx, ca, rpl, tbl, rfl
 
 
 def check_progress(num=None, denom=None, cTime=None):
@@ -389,19 +392,24 @@ def time_phase(phase=None, start=False, end=None, study_area=None):
         if phase == '3':
             text = 'Create network: ' + study_area
         if phase == '4':
-            text = 'Voronoi and PP2N creation: ' + study_area######################################### timing for each
+            text = 'Voronoi and PP2N creation: ' + study_area
         if phase == '5':
             text = 'Snapping observations to network: ' + study_area
         if phase == '6':
             text = 'Calculating cost matrices: ' + study_area
+        if phase == '6.1':
+            text = 'Segment-to-Segment subpahse: ' + study_area
         if phase == '7':
+            text = 'Hard code plots: ' + study_area
+        if phase == '8':
+            text = 'Summary Stats: ' + study_area
+        if phase == '9':
             text = 'Facility Location: ' + study_area
-        
         print('Initializing Phase', phase + ':\t', text)
         return time.time()
     
     if end:
-        end = round((time.time()-end)/60., 3)
+        end = round((time.time()-end)/60., 10)
         print('Phase', phase, 'complete')
         print('\tTotal minutes for phase', phase + ':\t', end)
         print('\tPhase', phase, 'complete:\t\t',\
@@ -413,7 +421,7 @@ def record_filter(df, column=None, sval=None, mval=None, oper=None):
     """used in phase 2 with incidents
     
     Parameters
-    ==========
+    ----------
     df : geopandas.GeoDataFrame
         dataframe of incident records
     oper : operator object *OR* str

@@ -14,6 +14,7 @@ import os, time
 
 # non-standard library imports
 import geopandas as gpd
+import pandas as pd
 import numpy as np
 import pulp
 
@@ -21,6 +22,104 @@ import pulp
 from . import utils
 from . import spaghetti as spgh
 from . import allocation as alct
+
+
+def generate_sine_lines(area, place_time, initial, geo_col=None, sid_name=None,
+                        proj_init=None, mtfcc='MTFCC', mtfcc_label='S1400',
+                        edge_file_prefix='Edges', file_type='.shp'):
+    '''Generate and write out connected, parallel sine functions
+    
+    Parameters
+    ----------
+    area : str
+        see `STUDY_AREA` in `runner_dissertation.py`
+    place_time : str
+        see `place_time` in `runner_dissertation.py`
+    initial : str
+        see `initial` in `runner_dissertation.py`
+    geo_col : str
+        geometry column name. Default is None.
+    sid_name : str
+        segment column name. Default is None.
+    proj_init : int
+        intial coordinate reference system. default is None.
+    mtfcc : str
+        MTFCC dataframe column name. Default is 'MTFCC'.
+    mtfcc_label : str
+        feature class code. Default is 'S1400'.
+    edge_file_prefix : str
+        write out edge .shp file prefix. Default is 'Edges'.
+    file_type : str
+        file extension. Default is '.shp'.
+    '''
+    
+    from shapely.geometry import Point, LineString
+    
+    # create sin arcs
+    xs1 = np.linspace(1, 14, 100)
+    
+    line1_coords = xs1[:75]
+    coords = zip(line1_coords, np.sin(line1_coords))
+    points = [Point(x,y) for (x,y) in coords]
+    line1 = LineString(points)
+    line1
+    
+    line2_coords = xs1[74:]
+    coords = zip(line2_coords, np.sin(line2_coords))
+    points = [Point(x,y) for (x,y) in coords]
+    line2 = LineString(points)
+    
+    line3_coords = xs1[:25]
+    coords = zip(line3_coords, np.sin(line3_coords)+5)
+    points = [Point(x,y) for (x,y) in coords]
+    line3 = LineString(points)
+    
+    line4_coords = xs1[24:]
+    coords = zip(line4_coords, np.sin(line4_coords)+5)
+    points = [Point(x,y) for (x,y) in coords]
+    line4 = LineString(points)
+    
+    line5 = LineString((Point(line2.coords[0]), Point(line2.coords[0][0], 2.5)))
+    line6 = LineString((Point(line4.coords[0]), Point(line4.coords[0][0], 2.5)))
+    line7 = LineString((Point(line5.coords[-1]), Point(line6.coords[-1])))
+    
+    line8 = LineString((Point(line1.coords[0]),
+                    Point(1,-2), Point(14,-2),
+                    Point(line2.coords[-1])))
+
+    line9 = LineString((Point(line3.coords[0]),
+                        Point(1,7), Point(14,7),
+                        Point(line4.coords[-1])))
+    line10 = LineString((Point(line8.coords[0]), Point(line9.coords[0])))
+    line11 = LineString((Point(line8.coords[-1]), Point(line9.coords[-1])))
+    
+    add_lines = [LineString(((0,-3), (0,8))),
+             LineString(((0,8), (15,8))),
+             LineString(((15,8), (15,-3))),
+             LineString(((15,-3), (0,-3)))]
+    
+    
+    lines = [line1, line2, line3, line4,
+         line5, line6, line7, line8,
+         line9, line10, line11]
+    
+    lines = lines + add_lines
+    
+    sine_arcs = gpd.GeoDataFrame(geometry=lines)
+    
+    sine_arcs = utils.set_crs(sine_arcs, proj_init=proj_init)
+    
+    sine_arcs[sid_name] = sine_arcs.index
+    
+    sine_arcs[mtfcc] = [mtfcc_label] * sine_arcs.shape[0]
+    
+    edges = edge_file_prefix + place_time
+    sine_edge_dir = initial + edges
+    
+    if not os.path.exists(sine_edge_dir):
+        os.makedirs(sine_edge_dir)
+    
+    sine_arcs.to_file(sine_edge_dir + '/' + edges + file_type)
 
 
 def generate_grid(area, place_time, initial, c_cen, as_fixed=True,
@@ -102,7 +201,7 @@ def generate_grid(area, place_time, initial, c_cen, as_fixed=True,
                                     n_hori_lines=hl, n_vert_lines=vl,
                                     withbox=False, as_polys=False)
     grid_arcs = utils.set_crs(grid_arcs, proj_init=proj_init)
-    grid_arcs[sid_name] = grid_arcs.index
+    grid_arcs[sid_name] = grid_arcs.index + 1
     grid_arcs[mtfcc] = [mtfcc_label] * grid_arcs.shape[0]
     edges = edge_file_prefix + place_time
     grid_edge_dir = initial + edges
@@ -309,13 +408,17 @@ def allocate(network, allocate_methods, segm_file=None, node_file=None,
                                     sid_name=sid_name, geo_col=geo_col,
                                     xyid=xyid, poly_key=poly_key,
                                     poly_pop=poly_pop, proj_init=proj_init,
-                                    restrict_col=restrict_col)
+                                    restrict_col=restrict_col,
+                                    problems_writer=alloc_dir+file_)
                 
                 # --- generate va2n points ---
                 if method == 'va2n':
                     
                     # get envelope bounds and bounds to clip by
                     if network.study_area == 'Test_Grid_Leon_FL':
+                        bound_type = 'CensusBlocks' + network.place_time
+                        bounds_file = cen_dir + bound_type + file_type
+                    elif network.study_area == 'Test_Sine_Leon_FL':
                         bound_type = 'CensusBlocks' + network.place_time
                         bounds_file = cen_dir + bound_type + file_type
                     else:
@@ -361,7 +464,7 @@ def allocate(network, allocate_methods, segm_file=None, node_file=None,
                 # update high-precision xyid
                 xyid_set.update(list(gdf[xyid]))
                 
-            time_end = round((time.time()-time_start)/60., 3)
+            time_end = round((time.time()-time_start)/60., 10)
             print('\t\tAllocation - %s complete in %s min.' % (method, 
                                                                time_end))
         
@@ -417,6 +520,56 @@ def add_location_based_dv_and_write(add_dv_write, xyid_set,
         info[gdf_label].to_file(info[out_file_label])
 
 
+def sine_voronoi(network, inter=None, alloc_dir=None, mtfcc=None,
+                 vor_offset=None, vor_rho=None):
+    """Create small line-generated voronoi diagram for plot.
+    
+    Parameters
+    ----------
+    
+    network : spaghetti.SpaghettiNetwork
+    alloc_dir : str
+        path to `allocation` data. Default is None.
+    vor_offset : {float, int}
+        'voronoi offset'. distance from articulation point to begin
+        and end segment densification. Default is 2. (meters).
+    vor_rho : int
+        'voronoi rho'. intial count of points to generate along line
+        segments. Default is 300.
+    
+    """
+    
+    study_area = network.study_area
+    inter = network.inter
+    segms = network.s_data
+    nodes = network.n_data
+    sid_name = network.sid_name
+    geo_col = network.geo_col
+    proj_init = network.proj_init
+    file_type = network.file_type
+    mtfcc = network.attr1
+    cols_in = [sid_name, mtfcc]
+    
+    # unary union for clipping
+    clip_by = gpd.GeoDataFrame(geometry=[segms.unary_union])
+    clip_by = utils.set_crs(clip_by, proj_init=proj_init)
+    # bounding envelope for initial voronoi trim
+    clip_by_env = [clip_by.envelope.squeeze()]
+    bounds = gpd.GeoDataFrame(geometry=clip_by_env)
+    bounds = utils.set_crs(bounds, proj_init=proj_init)
+    
+    lvd = alct.faux_lvd(study_area, segms, nodes, remove_segm=None,
+                        mtfcc=mtfcc, bounds=bounds, clip_by=clip_by,
+                        initial_rho=vor_rho, offset_param=vor_offset,
+                        incremental_rho=10, id_col=sid_name, cols_in=cols_in,
+                        symdiff_buff=0.00001, area_thresh=0.8, geo_col=geo_col,
+                        inter=inter, proj_init=proj_init, file_type=file_type)
+    
+    lvd_file = '%slvd_%s_%s%s' % (alloc_dir, vor_rho, study_area, file_type)
+    
+    lvd.to_file(lvd_file)
+
+
 def snap_obsvs(network, segm_file=None, clean=None, geographic_units=None,
                non_geographic_units=None, restrict=None, restrict_col=None,
                snap_to=None, representation=None, pp2n=None, va2n=None,
@@ -429,7 +582,7 @@ def snap_obsvs(network, segm_file=None, clean=None, geographic_units=None,
     network : spaghetti.SpaghettiNetwork
     segm_file : str
         path to segments file
-    restrict            list
+    restrict : list
         restricted segment types. Default is None.
     restrict_col : str
         column name for segment restriction stipulation.
@@ -496,14 +649,14 @@ def snap_obsvs(network, segm_file=None, clean=None, geographic_units=None,
                     continue
                 
                 launch_snap_job(observation_types[repr][gu],
-                                repr=repr, net=network,
+                                repr=repr, net=network, pp2n=pp2n,
                                 snap_to=snap_to, segm_file=segmsdf,
                                 kd_tree=net_nodes_kdtree,
                                 file_type=file_type)
 
 
 def launch_snap_job(info, repr=None, net=None, snap_to=None,
-                    kd_tree=None, segm_file=None,
+                    kd_tree=None, segm_file=None, pp2n=None,
                     file_type=None, k=20, tol=.001):
     """launch a single observation pattern point snap process
     
@@ -519,6 +672,7 @@ def launch_snap_job(info, repr=None, net=None, snap_to=None,
     snap_to : see snap_obsvs()
     k : see snap_obsvs()
     segm_file : see snap_obsvs()
+    pp2n : see snap_obsvs()
     tol : see snap_obsvs()
     file_type : str
         file extension. Default is '.shp'.
@@ -794,41 +948,183 @@ def matrix_calc(network, segm_file=None, clean=None, snap_to=None,
                 spgh.dump_pickled(nearest, write_path, pickle_name=nn)
 
 
+def segment_midpoints(area_prefix=None, obs_dir=None, cen_dir=None,
+                      net_dir=None, mtx_dir=None, alc_dir=None,
+                      sid=None, mtfcc=None, geo_col=None, xyid=None,
+                      restrict=None, restrict_col=None,
+                      mp_geom='mp_geom', file_type='.shp',
+                      adjusted=False, to_fs=False):
+    """
+    
+    """
+    
+    area_base = 'Leon_FL'
+    area_suffix = '_2010' + file_type
+    if area_prefix:
+        area = area_prefix + area_base
+    else:
+        area = area_base
+    place_time_shp = area_base + area_suffix
+    
+    # read in network
+    network = spgh.load_pickled(net_dir)
+    
+    df_name = 'SegmMidpoints'
+    df_file = '%s_%s_%s' % (df_name, area_base, '2010')
+    
+    repr = ''
+    snapped_file = net_dir + 'Snapped_' + repr + df_file + file_type
+    pickle_file = 'PointPattern_' + df_name
+    
+    # determine existence of files
+    snapped_file_exists = os.path.exists(snapped_file)
+    pickle_file_exists = os.path.exists(net_dir+pickle_file)
+    
+    if not snapped_file_exists and not pickle_file_exists:
+    
+        segm_file = '%sSimplifiedSegms_%s' % (net_dir, place_time_shp)
+        segm_gdf = gpd.read_file(segm_file)
+        
+        # boiled down segments dataframe
+        only_need_cols = [sid, mtfcc, geo_col]
+        boiled = segm_gdf[only_need_cols]
+        
+        # mipoints frame
+        segm_mps = gpd.GeoDataFrame(boiled[[sid, mtfcc]].copy())
+        # midpoints
+        mps = []
+        for df_idx in segm_mps.index:
+            seg_id = segm_mps.loc[df_idx, sid]
+            geom = boiled.loc[(boiled[sid] == seg_id), geo_col].squeeze()
+            midpoint = geom.interpolate(.5, normalized=True)
+            mps.append(midpoint)
+        # add midpoints
+        segm_mps[geo_col] = mps
+        
+        #
+        segmsdf, network = spgh.remove_restricted_segms(segm_gdf, network,
+                                                        restr=restrict,
+                                                        col=mtfcc)
+        k=20
+        tol=.001
+        kd_tree = spgh.build_net_nodes_kdtree(network.node2coords)
+        
+        # instantiate pointpattern
+        pointpattern = spgh.SpaghettiPointPattern(df=segm_mps,
+                                                  net=network,
+                                                  snap_to='segments',
+                                                  k=k,
+                                                  df_name=df_name,
+                                                  tol=tol,
+                                                  df_key=sid,
+                                                  kd_tree=kd_tree,
+                                                  net_segms=segm_gdf)
+        if area_prefix == 'Test_Tract_Leon_FL':
+            restr_ids = pointpattern.snapped_points[\
+                        pointpattern.snapped_points[sid]\
+                        != pointpattern.snapped_points['assoc_segm']][sid]
+        if not area_prefix:
+            restr_ids = list(range(100))
+        
+        pointpattern.restr_ids = restr_ids
+        
+        # write snapped points to file
+        pointpattern.snapped_points.to_file(snapped_file)
+        # pickle point pattern
+        spgh.dump_pickled(pointpattern, net_dir, pickle_name=pickle_file)
+    else:
+        pointpattern = spgh.load_pickled(net_dir, pickle_name=pickle_file)
+    
+    ###############################################
+    # cost matrices
+    from_nodes = False
+    numeric_cols = ['assoc_segm', 'dist2line','dist_a',
+                    'node_a', 'dist_b','node_b']
+    wsnap = 'dist2line'
+    assoc_col = 'assoc_segm'
+    
+    euclidean = 'euclidean'
+    snapped = 'Snapped_'
+    distance_types = [euclidean, 'network']
+    
+    # distance arrays write path
+    dist_arrays_name = 'dist_arrays'
+    symmetric = True
+    if to_fs:
+        symmetric = False
+        if area_prefix == 'Test_Tract_Leon_FL':
+            synth = '_Synthetic'
+        else:
+            synth = ''
+        fs_name = 'FireStations' + synth
+        fs_filename = obs_dir + 'Snapped_' + fs_name + '_Leon_FL_2010' + file_type
+        fs_gdf = gpd.read_file(fs_filename)
+        dist_arrays_name = dist_arrays_name + '_to_' + fs_name
+    
+    # dataframe write path
+    dist_arrays_full_path = mtx_dir + dist_arrays_name + '.pkl'
+    dist_arrays_wp_exists = os.path.exists(dist_arrays_full_path)
+    
+    if not dist_arrays_wp_exists:
+    
+        dist_arrays = {}
+        for dist in distance_types:
+            
+            if to_fs:
+                orig = fs_gdf
+                name = '%s_%s_to_%s_' % (dist, fs_name, df_name)
+            else:
+                orig = pointpattern.snapped_points
+                name = '%s_%s_to_%s_' % (dist, df_name, df_name)
+            
+            write_path = '%s%s' % (mtx_dir, name)
+            # dataframe write path
+            df_wp = write_path + 'DataFrame.csv'
+            
+            frame_mtx_exists = False
+            frame_mtx_exists = os.path.exists(df_wp)
+            
+            if not frame_mtx_exists:
+            
+                mtx = spgh.obs2obs_cost_matrix(orig,
+                                            dest=pointpattern.snapped_points,
+                                            symmetric=symmetric,
+                                            network_matrix=network.n2n_matrix,
+                                            from_nodes=from_nodes,
+                                            wsnap_dist=wsnap,
+                                            distance_type=dist,
+                                            xyid=network.xyid,
+                                            numeric_cols=numeric_cols,
+                                            assoc_col=assoc_col)
+                
+                # filter restricted combinations
+                col_idx = [idx for idx in pointpattern.snapped_points[sid]]
+                if to_fs:
+                    row_idx = [idx for idx in fs_gdf['STATION_NU']]
+                else:
+                    row_idx = [idx for idx in pointpattern.snapped_points[sid]]
+                
+                rix, cix = row_idx, col_idx
+                frame_matrix = gpd.GeoDataFrame(mtx, columns=cix, index=rix)
+                
+                if not to_fs:
+                    frame_matrix.drop(pointpattern.restr_ids, axis=0, inplace=True)
+                frame_matrix.drop(pointpattern.restr_ids, axis=1, inplace=True)
+                
+                frame_matrix.to_csv(df_wp, header=True, index=True)
+            else:
+                
+                frame_matrix = pd.read_csv(df_wp, header=0, index_col=0)
+            cost_array = frame_matrix.values 
+            dist_arrays[dist] = cost_array
+            
+        spgh.dump_pickled(dist_arrays, mtx_dir, pickle_name=dist_arrays_name)
+
+
 def facility_location():
     """
     """
     pass
-
-
-
-def plot_geographies():
-    """
-    """
-    pass
-
-
-def plot_streets():
-    """
-    """
-    pass
-
-
-def plot_euclidean_v_network():
-    """
-    """
-    pass
-
-
-def viz_facility_location_():
-    """
-    """
-    pass
-    
-
-def plot_facility_location():
-    """
-    """
-    
 
 
 def obsv_types(clean=None, place_time=None, pp2n='', va2n=''):
@@ -929,7 +1225,7 @@ def obsv_types(clean=None, place_time=None, pp2n='', va2n=''):
             
             'pp2n':
                 {'pop_blocks':
-                    {'name': 'pp2nPopulatedBlocks',
+                    {'name': 'pp2n%sPopulatedBlocks' % pp2n,
                      'poly_name': 'PopulatedBlocks',
                      'path': clean + 'allocation_data/',
                      'poly_path': clean + 'census_data/',
@@ -941,7 +1237,7 @@ def obsv_types(clean=None, place_time=None, pp2n='', va2n=''):
                      'pop': 'pop_pp2n',
                      'poly_pop': 'POP100'},
                  'block_groups':
-                    {'name': 'pp2nBlockGroups',
+                    {'name': 'pp2n%sBlockGroups' % pp2n,
                      'poly_name': 'BlockGroups',
                      'path': clean + 'allocation_data/',
                      'poly_path': clean + 'census_data/',
@@ -953,7 +1249,7 @@ def obsv_types(clean=None, place_time=None, pp2n='', va2n=''):
                      'pop': 'pop_pp2n',
                      'poly_pop': 'POP100'},
                  'tracts':
-                     {'name': 'pp2nTracts',
+                     {'name': 'pp2n%sTracts' % pp2n,
                       'poly_name': 'Tracts',
                       'path': clean + 'allocation_data/',
                       'poly_path': clean + 'census_data/',

@@ -211,7 +211,7 @@ def write_file(df, df_geo=None, xyid=None, geo_col=None, file_type=None):
 
 def clean_parcels(in_file=None, pf=None, proj_init=None, proj_trans=None,
                   geo_col=None, xyid=None, desc_var=None, print_diags=True,
-                  in_geogs=None, min_thresh=0.0, buffer=0.001,
+                  in_geogs=None, min_thresh=0.0, buffer=0.00001,
                   popcol=None, subset_cols=None, file_type='.shp'):
     """subset populated block / parcels overlay
     
@@ -257,27 +257,17 @@ def clean_parcels(in_file=None, pf=None, proj_init=None, proj_trans=None,
     # transform crs
     df = utils.set_crs(df, proj_init=proj_init, proj_trans=proj_trans)
     
-    # subset to only populated parcels
-    pop_df = df[df[popcol] > min_thresh]
-    
-    # Keep only populated parcels
-    if print_diags:
-        print('\t**** Dropping unpopulated parcels ***')
-        print('\t\tTotal parcels:\t\t\t%s' % df.shape[0])
-        print('\t\tPopulated parcels:\t\t%s' % pop_df.shape[0])
-        print('\t-----------------------------------------------------')
-    
-    # derive centroids
-    gdf = pop_df.copy()
-    gdf[geo_col] = gdf.centroid
-    
     # add desc var
-    gdf[desc_var] = utils.desc_var_list('client', gdf.shape[0])
+    df[desc_var] = utils.desc_var_list('client', df.shape[0])
     
     if xyid:
-        gdf.reset_index(inplace=True, drop=True)
-        xyid_list = utils.generate_xyid(df=gdf, geo_col=geo_col)
-        gdf = utils.fill_frame(gdf, col=xyid, data=xyid_list)
+        #gdf.reset_index(inplace=True, drop=True)
+        xyid_list = utils.generate_xyid(df=df, geo_col=geo_col)
+        df = utils.fill_frame(df, col=xyid, data=xyid_list)
+    
+    # derive centroids
+    gdf = df.copy()
+    gdf[geo_col] = gdf.centroid
     
     # perform overlay for extracting census geography location
     for in_geog in in_geogs:
@@ -285,7 +275,34 @@ def clean_parcels(in_file=None, pf=None, proj_init=None, proj_trans=None,
                                    buffer, file_type, xyid=xyid,
                                    desc_var=desc_var)
     
+    parcel_set = set(df['PARCEL_ID'])
+    centroid_set = set(gdf['PARCEL_ID'])
+    set_diff = parcel_set.symmetric_difference(centroid_set)
+    
+    tract_ids_map = dict(gdf[['PARCEL_ID','TRACT']].values)
+    
+    df['TRACT'] = df['PARCEL_ID'].map(tract_ids_map)
+    
+    if print_diags:
+        print('\t**** Dropped parcels due to geometry ***')
+        print('\t\t', set_diff)
+        print('\n')
+    
+    # subset to only populated parcels
+    print('\t\tpredrop 0 pop centroids:\t\t\t%s' % gdf.shape[0])
+    pop_gdf = gdf[gdf[popcol] > 0.0]
+    print('\t\tpostdrop 0 pop centroids:\t\t\t%s' % pop_gdf.shape[0])
+    pop_gdf.reset_index(inplace=True, drop=True)
+    
+    # Keep only populated parcels
+    if print_diags:
+        print('\t**** Dropping unpopulated parcels ***')
+        print('\t\tTotal parcels:\t\t\t%s' % df.shape[0])
+        print('\t\tPopulated parcels:\t\t%s' % pop_gdf.shape[0])
+        print('\t-----------------------------------------------------')
+    
     # write
-    gdf.to_file('%s%s' % (pf, file_type))
+    df.to_file('../data/Leon_FL/clean/census_data/ParcelPolygons_Leon_FL_2010%s' % (file_type))
+    pop_gdf.to_file('%s%s' % (pf, file_type))
 
 
