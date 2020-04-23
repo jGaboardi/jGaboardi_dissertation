@@ -9,3 +9,8 @@ This repository houses the source code for my PhD disseration. The intended usag
 
 **(02/19/2019)**
 **James D. Gaboardi**
+
+## Funding
+This project was partially funded through:
+
+[<img align="middle" src="figs/ardc_logo.png" width="150">](https://atlantardc.wordpress.com) Atlanta Research Data Center: [A Polygon-Based Approach to Spatial Network Allocation](https://atlantardc.files.wordpress.com/2018/05/ardc-newsletter_2018_2.pdf)
