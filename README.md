@@ -9,6 +9,10 @@ This repository houses the source code for my PhD disseration. The intended usag
 **(02/19/2019)**
 **James D. Gaboardi**
 
+## Related
+
+ * [`jGaboardi/pp2n`](https://github.com/jGaboardi/pp2n)
+
 ## Funding
 This project was partially funded through:
 
