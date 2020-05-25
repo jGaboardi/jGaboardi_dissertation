@@ -12,6 +12,7 @@ This repository houses the source code for my PhD disseration. The intended usag
 ## Related
 
  * [`jGaboardi/pp2n`](https://github.com/jGaboardi/pp2n)
+ * [`jGaboardi/tigernet`](https://github.com/jGaboardi/tigernet)
 
 ## Funding
 This project was partially funded through:
